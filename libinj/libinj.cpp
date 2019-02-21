@@ -1,13 +1,66 @@
 #include "stdafx.h"
 #include "libinj.h"
 #include <Psapi.h>
+#include <sstream>
+#include <algorithm>
 
 typedef BOOL(WINAPI *LPFN_ISWOW64PROCESS) (HANDLE, PBOOL);
 LPFN_ISWOW64PROCESS fnIsWow64Process;
+HANDLE proc_handle;
+string last_error_msg;
+const char* getLastError()
+{
+	return last_error_msg.c_str();
+
+}
+BOOL setPrivilege(HANDLE hToken, LPCTSTR lpszPrivilege, BOOL bEnablePrivilege)
+{
+	TOKEN_PRIVILEGES tp;
+	LUID luid;
+
+	if (!LookupPrivilegeValue(
+		NULL,            // lookup privilege on local system
+		lpszPrivilege,   // privilege to lookup 
+		&luid))        // receives LUID of privilege
+	{
+		printf("LookupPrivilegeValue error: %u\n", GetLastError());
+		return FALSE;
+	}
+
+	tp.PrivilegeCount = 1;
+	tp.Privileges[0].Luid = luid;
+	if (bEnablePrivilege)
+		tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+	else
+		tp.Privileges[0].Attributes = 0;
+
+	// Enable the privilege or disable all privileges.
+
+	if (!AdjustTokenPrivileges(
+		hToken,
+		FALSE,
+		&tp,
+		sizeof(TOKEN_PRIVILEGES),
+		(PTOKEN_PRIVILEGES)NULL,
+		(PDWORD)NULL))
+	{
+		printf("AdjustTokenPrivileges error: %u\n", GetLastError());
+		return FALSE;
+	}
+
+	if (GetLastError() == ERROR_NOT_ALL_ASSIGNED)
+
+	{
+		printf("The token does not have the specified privilege. \n");
+		return FALSE;
+	}
+
+	return TRUE;
+}
 
 bool is32bit(DWORD pId)
 {
-	HANDLE processHandle = OpenProcess(PROCESS_QUERY_INFORMATION, false, pId);
+	HANDLE proc_handle = OpenProcess(PROCESS_QUERY_INFORMATION, false, pId);
 	BOOL bIsWow64 = FALSE;
 
 	//IsWow64Process is not available on all supported versions of Windows.
@@ -18,42 +71,130 @@ bool is32bit(DWORD pId)
 
 	if (fnIsWow64Process != NULL)
 	{
-		if (!fnIsWow64Process(processHandle, &bIsWow64))
+		if (!fnIsWow64Process(proc_handle, &bIsWow64))
 		{
 			//handle error
 		}
 	}
-	CloseHandle(processHandle);
+	CloseHandle(proc_handle);
 	return bIsWow64;
 }
 
-bool Inject(uint64_t pId, char *dllName)
+std::string getLastErrorAsString()
 {
-	HANDLE h = OpenProcess(PROCESS_ALL_ACCESS, false, pId);
-	if (h) {
-		if (is32bit(pId))
-		{
-			return Inject32(pId, dllName, h);
-		}
-		else {
-			return Inject64(dllName, h);
-		}
+	//Get the error message, if any.
+	DWORD errorMessageID = ::GetLastError();
+	if (errorMessageID == 0)
+		return std::string(); //No error message has been recorded
 
-	}
-	return false;
+	LPSTR messageBuffer = nullptr;
+	size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+		NULL, errorMessageID, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&messageBuffer, 0, NULL);
+
+	std::string message(messageBuffer, size);
+	message.erase(std::remove(message.begin(), message.end(), '\n'), message.end());
+	message.erase(std::remove(message.begin(), message.end(), '\r'), message.end());
+	//Free the buffer.
+	LocalFree(messageBuffer);
+
+	return message;
 }
+
+bool Inject(uint64_t pId, char *dllName, int injection_method, HANDLE h)
+{
+	stringstream msg;
+	HANDLE hToken;
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+	{
+		logError("OpenProcessToken Failed", true);
+		return false;
+	}
+	if (!setPrivilege(hToken, SE_DEBUG_NAME, TRUE))
+	{
+		logError("SetPrivilege Failed", true);
+		return false;
+	}
+	CloseHandle(hToken);
+
+	switch (injection_method)
+	{
+		case 1: //loadlibary
+		{
+			if (!h) 
+				h = OpenProcess(PROCESS_ALL_ACCESS, false, pId);
+			if (h) {
+				if (is32bit(pId))
+				{
+					return Inject32(pId, dllName, h);
+				}
+				else {
+					return Inject64(dllName, h);
+				}
+
+			} else {
+				msg << "Couldn't open handle to process [" << getLastErrorAsString() << "]" << endl;
+				last_error_msg = msg.str();
+				return false;
+			}
+		}
+		case 2: //manual map
+		{
+
+		}
+	}
+	return true;
+}
+
+DWORD prev_error = GetLastError();
+bool logError(std::string log_msg, bool bypass_getlasterror = false)
+{
+	if (prev_error != GetLastError() || bypass_getlasterror)
+	{
+		stringstream msg;
+		msg << log_msg << " [" << getLastErrorAsString() << "]" << endl;
+		last_error_msg = msg.str();
+		return true;
+	}
+	else {
+		return false;
+	}
+}
+
 
 bool Inject32(uint64_t pId, char *dllName, HANDLE h)
 {
 	if (h)
 	{
-		LPVOID LoadLibAddr = (LPVOID)pe_getFunctionAddress32(pId, "kernelbase.dll", "loadlibrarya", h);
-		LPVOID dereercomp = VirtualAllocEx(h, NULL, strlen(dllName), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-		WriteProcessMemory(h, dereercomp, dllName, strlen(dllName), NULL);
-		HANDLE asdc = CreateRemoteThread(h, NULL, NULL, (LPTHREAD_START_ROUTINE)LoadLibAddr, dereercomp, 0, NULL);
-		WaitForSingleObject(asdc, INFINITE);
-		VirtualFreeEx(h, dereercomp, strlen(dllName), MEM_RELEASE);
-		CloseHandle(asdc);
+		stringstream msg;
+		DWORD x = GetLastError();
+		LPVOID loadLibraryAddress = (LPVOID)pe_getFunctionAddress32(pId, "kernelbase.dll", "loadlibrarya", h);
+
+		if (logError("Failed to get kernelbase.dll, LoadLibraryA"))
+			return false;
+
+		LPVOID dllPath_ptr = VirtualAllocEx(h, NULL, strlen(dllName), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+		if (logError("Failed to allocate memory for the dll path"))
+			return false;
+
+		WriteProcessMemory(h, dllPath_ptr, dllName, strlen(dllName), NULL);
+
+		if (logError("Failed to write process memory of the dllpath"))
+			return false;
+
+		HANDLE remoteThread = CreateRemoteThread(h, NULL, NULL, (LPTHREAD_START_ROUTINE)loadLibraryAddress, dllPath_ptr, 0, NULL);
+
+		if (logError("Failed to CreateRemoteThread with the LoadLibraryA address"))
+			return false;
+
+		WaitForSingleObject(remoteThread, INFINITE);
+
+		VirtualFreeEx(h, dllPath_ptr, strlen(dllName), MEM_RELEASE);
+
+		if (logError("Failed to VirtualFreeEx memory for the dllpath"))
+			return false;
+
+		CloseHandle(remoteThread);
 		CloseHandle(h);
 		return true;
 	}
@@ -64,13 +205,36 @@ bool Inject64(char *dllName, HANDLE h)
 {
 	if (h)
 	{
-		LPVOID LoadLibAddr = (LPVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
-		LPVOID dereercomp = VirtualAllocEx(h, NULL, strlen(dllName), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-		WriteProcessMemory(h, dereercomp, dllName, strlen(dllName), NULL);
-		HANDLE asdc = CreateRemoteThread(h, NULL, NULL, (LPTHREAD_START_ROUTINE)LoadLibAddr, dereercomp, 0, NULL);
-		WaitForSingleObject(asdc, INFINITE);
-		VirtualFreeEx(h, dereercomp, strlen(dllName), MEM_RELEASE);
-		CloseHandle(asdc);
+		
+		DWORD x = GetLastError();
+		LPVOID loadLibraryAddress = (LPVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
+
+		if (logError("Failed to get kernel32.dll, LoadLibraryA"))
+			return false;
+
+		LPVOID dllPath_ptr = VirtualAllocEx(h, NULL, strlen(dllName), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+		if (logError("Failed to allocate memory for the dll path"))
+			return false;
+
+		WriteProcessMemory(h, dllPath_ptr, dllName, strlen(dllName), NULL);
+
+		if (logError("Failed to write process memory of the dllpath"))
+			return false;
+
+		HANDLE remoteThread = CreateRemoteThread(h, NULL, NULL, (LPTHREAD_START_ROUTINE)loadLibraryAddress, dllPath_ptr, 0, NULL);
+
+		if (logError("Failed to CreateRemoteThread with the LoadLibraryA address"))
+			return false;
+
+		WaitForSingleObject(remoteThread, INFINITE);
+
+		VirtualFreeEx(h, dllPath_ptr, 0, MEM_RELEASE);
+
+		if (logError("Failed to VirtualFreeEx memory for the dllpath"))
+			return false;
+
+		CloseHandle(remoteThread);
 		CloseHandle(h);
 		return true;
 	}
