@@ -9,15 +9,14 @@
 using namespace std;
 extern "C"
 {
-	libinj_api	DWORD pe_getFunctionAddress32(uint64_t pId, string mod, string fn, HANDLE hProcess);
-	libinj_api	DWORD getBaseAddress(uint64_t pid);
-	libinj_api	DWORD getModuleBase(HANDLE hProcess, string moduleName);
-	libinj_api	bool is32bit(DWORD pId);
-	libinj_api  bool Inject(uint64_t pId, char *dllName, int injection_method, HANDLE h);
+	libinj_api	DWORD getFunctionAddress32(string mod, const string& functionName, HANDLE hProcess);
+	libinj_api	DWORD GetBaseAddress(uint64_t pid);
+	libinj_api	DWORD GetModuleBase(HANDLE hProcess, string moduleName);
+	libinj_api	bool Is32Bit(DWORD pId);
+	libinj_api  bool Inject(uint64_t pId, char *dllName, int injectionMethod, HANDLE h);
 	libinj_api	bool Inject64(char *dllName, HANDLE h);
-	libinj_api	bool Inject32(uint64_t pId, char *dllName, HANDLE h);
+	libinj_api	bool Inject32(char *dllName, HANDLE h);
 	libinj_api	const char* getLastError();
 	libinj_api	std::string getLastErrorAsString();
-	libinj_api	BOOL setPrivilege(HANDLE hToken, LPCTSTR lpszPrivilege, BOOL bEnablePrivilege);
-	bool logError(std::string log_msg, bool bypass_getlasterror);
+	libinj_api	BOOL SetPrivilege(HANDLE hToken, LPCTSTR lpszPrivilege, BOOL bEnablePrivilege);
 }
